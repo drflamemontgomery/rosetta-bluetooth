@@ -24,6 +24,8 @@ limitations under the License.
 #include <Arduino.h>
 #include <Bluepad32.h>
 
+#include <Wire.h>
+
 //
 // README FIRST, README FIRST, README FIRST
 //
@@ -79,6 +81,64 @@ void onDisconnectedGamepad(GamepadPtr gp) {
     }
 }
 
+
+/* Communications struct:
+id: bits 7-5, controller id 0-7, bit 4, valid, bits 3-0, controller type
+ buttons: up, down, left, right, a, b, x, y
+ buttons: left stick button, right stick button, RB, LB, alt LB, alt RB (switch joycon), 0, 0
+ left x axis
+ left y axis
+ right x axis
+ right y axis
+k secondary buttons: home, alt, start, select, 0, 0, 0, 0
+ left trigger
+ right trigger
+ data 6 bytes
+*/
+struct commsGP{
+    byte id;
+    byte buttons1;
+    byte buttons2;
+    short lx_axis;
+    short ly_axis;
+    short rx_axis;
+    short ry_axis;
+    byte secondary_buttons;
+    ushort left_trigger;
+    ushort right_trigger;
+    byte data[6];
+};
+
+
+commsGP array_gamepads[BP32_MAX_GAMEPADS];
+
+//Writes MSB then LSB
+void wireWriteShort(short value){
+    Wire.write((byte)(value >> 8));
+    Wire.write((byte)(value && 0xFF));
+}
+
+//Event request function called when a request is received
+//More details of inter processor communication to implement
+void i2cRequest(void) { 
+    for(int i = 0; i < BP32_MAX_GAMEPADS; i++){
+        Wire.write(array_gamepads[i].id);
+        Wire.write(array_gamepads[i].buttons1);
+        Wire.write(array_gamepads[i].buttons2);
+        wireWriteShort(array_gamepads[i].lx_axis);
+        wireWriteShort(array_gamepads[i].ly_axis);
+        wireWriteShort(array_gamepads[i].rx_axis);
+        wireWriteShort(array_gamepads[i].ry_axis);
+        Wire.write(array_gamepads[i].secondary_buttons);
+        wireWriteShort(array_gamepads[i].left_trigger);
+        wireWriteShort(array_gamepads[i].right_trigger);
+        for(int j = 0; j < 6; j++){
+            Wire.write(array_gamepads[i].data[j]);
+        }
+    }
+ }
+
+
 // Arduino setup function. Runs in CPU 1
 void setup() {
     Console.printf("Firmware: %s\n", BP32.firmwareVersion());
@@ -92,6 +152,9 @@ void setup() {
     // Forgetting Bluetooth keys prevents "paired" gamepads to reconnect.
     // But might also fix some connection / re-connection issues.
     BP32.forgetBluetoothKeys();
+
+    Wire.begin(0x20);
+    Wire.onRequest(i2cRequest);
 }
 
 // Arduino loop function. Runs in CPU 1
@@ -111,6 +174,28 @@ void loop() {
             // There are different ways to query whether a button is pressed.
             // By query each button individually:
             //  a(), b(), x(), y(), l1(), etc...
+
+            // Rosetta code -----------------
+            //Add gamepad values to struct
+            array_gamepads[i].id = (byte)(i << 5);
+            array_gamepads[i].id = (byte)(array_gamepads[i].id) | (1 << 4);       // isConnected()
+            array_gamepads[i].id = (byte)(array_gamepads[i].id) | (3);            // controller enum
+
+            array_gamepads[i].buttons1 = (byte)(myGamepad->buttons() >> 8);
+
+            array_gamepads[i].buttons2 = (byte)(myGamepad->buttons() & 0xFF);
+
+            array_gamepads[i].lx_axis = (short)(myGamepad->axisX());
+            array_gamepads[i].ly_axis = (short)(myGamepad->axisY());
+            array_gamepads[i].rx_axis = (short)(myGamepad->axisRX());
+            array_gamepads[i].ry_axis = (short)(myGamepad->axisRY());
+
+            array_gamepads[i].left_trigger = (short)(myGamepad->brake());
+            array_gamepads[i].right_trigger = (short)(myGamepad->throttle());
+
+            array_gamepads[i].secondary_buttons = (byte)(myGamepad->miscButtons());
+
+
             if (myGamepad->a()) {
                 static int colorIdx = 0;
                 // Some gamepads like DS4 and DualSense support changing the color LED.
@@ -152,28 +237,35 @@ void loop() {
                 myGamepad->setRumble(0xc0 /* force */, 0xc0 /* duration */);
             }
 
-            // Another way to query the buttons, is by calling buttons(), or
-            // miscButtons() which return a bitmask.
-            // Some gamepads also have DPAD, axis and more.
-            Console.printf(
-                "idx=%d, dpad: 0x%02x, buttons: 0x%04x, axis L: %4d, %4d, axis R: %4d, "
-                "%4d, brake: %4d, throttle: %4d, misc: 0x%02x\n",
-                i,                        // Gamepad Index
-                myGamepad->dpad(),        // DPAD
-                myGamepad->buttons(),     // bitmask of pressed buttons
-                myGamepad->axisX(),       // (-511 - 512) left X Axis
-                myGamepad->axisY(),       // (-511 - 512) left Y axis
-                myGamepad->axisRX(),      // (-511 - 512) right X axis
-                myGamepad->axisRY(),      // (-511 - 512) right Y axis
-                myGamepad->brake(),       // (0 - 1023): brake button
-                myGamepad->throttle(),    // (0 - 1023): throttle (AKA gas) button
-                myGamepad->miscButtons()  // bitmak of pressed "misc" buttons
-            );
+            static int count = 0;
+            if(count < 100){
+                count++;
+            } else {
+
+                // Another way to query the buttons, is by calling buttons(), or
+                // miscButtons() which return a bitmask.
+                // Some gamepads also have DPAD, axis and more.
+                Console.printf(
+                    "idx=%d, dpad: 0x%02x, buttons: 0x%04x, axis L: %4d, %4d, axis R: %4d, "
+                    "%4d, brake: %4d, throttle: %4d, misc: 0x%02x\n",
+                    i,                        // Gamepad Index
+                    myGamepad->dpad(),        // DPAD
+                    myGamepad->buttons(),     // bitmask of pressed buttons
+                    myGamepad->axisX(),       // (-511 - 512) left X Axis
+                    myGamepad->axisY(),       // (-511 - 512) left Y axis
+                    myGamepad->axisRX(),      // (-511 - 512) right X axis
+                    myGamepad->axisRY(),      // (-511 - 512) right Y axis
+                    myGamepad->brake(),       // (0 - 1023): brake button
+                    myGamepad->throttle(),    // (0 - 1023): throttle (AKA gas) button
+                    myGamepad->miscButtons()  // bitmak of pressed "misc" buttons
+                );
+                count = 0;
+            }
 
             // You can query the axis and other properties as well. See Gamepad.h
             // For all the available functions.
         }
     }
 
-    delay(150);
+    delay(2);
 }
